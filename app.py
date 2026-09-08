@@ -68,6 +68,17 @@ def _anadir_propiedad_extra(nombre: str, direccion: str) -> None:
     tabla.to_csv(PROPIEDADES_EXTRA_CSV, index=False, sep=";")
 
 
+def _borrar_propiedad_extra(nombre: str) -> None:
+    if not PROPIEDADES_EXTRA_CSV.exists():
+        return
+    tabla = pd.read_csv(PROPIEDADES_EXTRA_CSV, dtype=str, sep=";").fillna("")
+    tabla = tabla[tabla["nombre"] != nombre]
+    if tabla.empty:
+        PROPIEDADES_EXTRA_CSV.unlink()
+    else:
+        tabla.to_csv(PROPIEDADES_EXTRA_CSV, index=False, sep=";")
+
+
 def _guardar_estado(resultado: dict) -> None:
     # Escritura atomica: con varias personas revisando a la vez, un guardado a medias dejaria
     # el JSON ilegible para el siguiente arranque.
@@ -156,14 +167,33 @@ with st.sidebar:
             "automática del nombre dentro de la factura. Se puede añadir en cualquier "
             "momento, incluso a mitad de revisar un lote."
         )
-        if extra:
-            for p in extra:
-                st.write(f"· {p['nombre']}" + (f" — {p['direccion']}" if p["direccion"] else ""))
+        for p in extra:
+            etiqueta = p["nombre"] + (f" — {p['direccion']}" if p["direccion"] else "")
+            col_txt, col_del = st.columns([4, 1])
+            # Recortada solo para mostrar: un pegado accidental (una fila de Excel entera,
+            # con DNI o teléfono) no se queda pegado en pantalla esperando a que alguien lo lea.
+            col_txt.write(f"· {etiqueta[:70]}{'…' if len(etiqueta) > 70 else ''}")
+            if col_del.button("✕", key=f"borrar_extra_{p['nombre']}", help="Quitar este piso"):
+                _borrar_propiedad_extra(p["nombre"])
+                st.rerun()
         with st.form("nueva_propiedad_extra", clear_on_submit=True):
             nombre_nuevo = st.text_input("Nombre del piso")
             direccion_nueva = st.text_input("Dirección (opcional, ayuda a identificarlo)")
-            if st.form_submit_button("Añadir piso") and nombre_nuevo.strip():
-                _anadir_propiedad_extra(nombre_nuevo.strip(), direccion_nueva.strip())
+            enviado = st.form_submit_button("Añadir piso")
+        if enviado:
+            nombre_ok = nombre_nuevo.strip()
+            direccion_ok = direccion_nueva.strip()
+            # Un nombre de verdad no trae tabuladores ni saltos de línea: si los trae, es un
+            # pegado por error (una fila entera de una hoja de cálculo), no un nombre de piso.
+            if not nombre_ok:
+                pass
+            elif "\t" in nombre_nuevo or "\n" in nombre_nuevo or len(nombre_ok) > 80 or len(direccion_ok) > 200:
+                st.error(
+                    "Eso no parece un nombre de piso — ¿se pegó una fila entera por error? "
+                    "Escribe solo el nombre."
+                )
+            else:
+                _anadir_propiedad_extra(nombre_ok, direccion_ok)
                 st.rerun()
 
 if compartido["resultado"] is None and ESTADO_JSON.exists():

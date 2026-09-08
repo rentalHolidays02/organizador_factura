@@ -124,8 +124,13 @@ def normalize_text(text: str) -> str:
 
 
 def sanitize_folder_name(name: str) -> str:
+    # Colapsa tabuladores y saltos de línea a un espacio: un pegado accidental de una fila
+    # entera de una hoja de cálculo no puede convertirse en un nombre de carpeta ilegible, y
+    # el recorte de longitud evita reventar el límite del sistema de archivos (mkdir con un
+    # nombre de cientos de caracteres falla con "File name too long").
+    name = re.sub(r"\s+", " ", name)
     name = re.sub(r'[\\/*?:"<>|]', "_", name).strip(" .")
-    return name or "Sin_nombre"
+    return (name or "Sin_nombre")[:80]
 
 
 def _nombre_sin_colision(dest_dir: Path, name: str) -> str:
