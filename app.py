@@ -148,6 +148,24 @@ with st.sidebar:
             st.rerun()
         st.caption("Borra el lote actual y su revisión. Descarga antes el resultado.")
 
+    st.divider()
+    with st.expander(f"Pisos que no están en Lodgify ({len(extra)})"):
+        st.caption(
+            "Se alquilan igual que los demás pero el dueño no los tiene dados de alta en "
+            "Lodgify. Se tratan como un piso más: carpeta propia, y entran en la búsqueda "
+            "automática del nombre dentro de la factura. Se puede añadir en cualquier "
+            "momento, incluso a mitad de revisar un lote."
+        )
+        if extra:
+            for p in extra:
+                st.write(f"· {p['nombre']}" + (f" — {p['direccion']}" if p["direccion"] else ""))
+        with st.form("nueva_propiedad_extra", clear_on_submit=True):
+            nombre_nuevo = st.text_input("Nombre del piso")
+            direccion_nueva = st.text_input("Dirección (opcional, ayuda a identificarlo)")
+            if st.form_submit_button("Añadir piso") and nombre_nuevo.strip():
+                _anadir_propiedad_extra(nombre_nuevo.strip(), direccion_nueva.strip())
+                st.rerun()
+
 if compartido["resultado"] is None and ESTADO_JSON.exists():
     guardado = json.loads(ESTADO_JSON.read_text(encoding="utf-8"))
     # Si alguien borró .sesion a mano queda el JSON apuntando a carpetas que ya no existen.
@@ -167,22 +185,6 @@ if resultado is None:
         "ZIP de facturas del trimestre", type=["zip"],
         help="Tal cual llega: PDF, JPG o PNG mezclados dentro.",
     )
-
-    with st.expander(f"Pisos que no están en Lodgify ({len(extra)})"):
-        st.caption(
-            "Se alquilan igual que los demás pero el dueño no los tiene dados de alta en "
-            "Lodgify. Se tratan como un piso más: carpeta propia, y entran en la búsqueda "
-            "automática del nombre dentro de la factura."
-        )
-        if extra:
-            for p in extra:
-                st.write(f"· {p['nombre']}" + (f" — {p['direccion']}" if p["direccion"] else ""))
-        with st.form("nueva_propiedad_extra", clear_on_submit=True):
-            nombre_nuevo = st.text_input("Nombre del piso")
-            direccion_nueva = st.text_input("Dirección (opcional, ayuda a identificarlo)")
-            if st.form_submit_button("Añadir piso") and nombre_nuevo.strip():
-                _anadir_propiedad_extra(nombre_nuevo.strip(), direccion_nueva.strip())
-                st.rerun()
 
     guardados = _codigos_guardados()
     if guardados is not None:
@@ -263,7 +265,10 @@ if resultado is None:
 
 # ---------------------------------------------------------------- lote ya procesado
 detalle = resultado["detalle"]
-props = resultado["properties"]
+# Lista en vivo, no la foto fija del momento de procesar: un piso añadido a mitad de
+# revisar un lote de varios días tiene que aparecer sin reprocesar nada. Si Lodgify falla
+# en una recarga puntual, mejor la última lista buena que dejar el desplegable vacío.
+props = properties or resultado["properties"]
 output_dir = Path(resultado["output_dir"])
 pendientes = [d for d in detalle if d["propiedad"] == "Sin identificar"]
 colocadas = len(detalle) - len(pendientes)
