@@ -1,6 +1,7 @@
 .sesion/
 __pycache__/
 .streamlit/secrets.toml
+.env
 
 # Datos reales: nunca al repo, aunque sea privado.
 *.zip

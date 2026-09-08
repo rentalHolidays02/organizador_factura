@@ -1,0 +1,19 @@
+services:
+  organizador:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      # Fuera del contenedor: un "docker compose down" o una reconstrucción de la
+      # imagen no puede borrar 5 días de trabajo si el estado vive en el host.
+      - ORGANIZADOR_SESION=/data/sesion
+      - ORGANIZADOR_CODIGOS=/data/codigos_guardados.csv
+    volumes:
+      - organizador_datos:/data
+    ports:
+      # Solo localhost: no se publica a la LAN ni a internet directamente.
+      # tailscale serve es lo único que expone el puerto, y solo dentro del tailnet.
+      - "127.0.0.1:8501:8501"
+
+volumes:
+  organizador_datos:
