@@ -346,7 +346,19 @@ with tab_revisar:
             st.rerun()
         nav_sel.caption(f"Grupo {pos + 1} de {len(grupos)} · {len(pendientes)} facturas sueltas")
 
-        actual = grupo[0]
+        if len(grupo) > 1:
+            archivo_sel = st.selectbox(
+                f"Factura de este grupo ({len(grupo)})",
+                [d["archivo"] for d in grupo],
+                format_func=lambda a: f"{a} — {next(d['importe'] for d in grupo if d['archivo'] == a) or 0:.2f} €",
+                # La clave lleva el grupo dentro: al cambiar de grupo, la opcion recordada del
+                # anterior no pinta nada aqui y Streamlit no intenta reusarla.
+                key=f"factura_sel_{pos}",
+            )
+            actual = next(d for d in grupo if d["archivo"] == archivo_sel)
+        else:
+            actual = grupo[0]
+
         ruta = next(output_dir.rglob(actual["archivo"]), None)
         if ruta is None:
             st.error(f"No se encuentra {actual['archivo']}. Empieza un lote nuevo desde la barra lateral.")
@@ -367,11 +379,6 @@ with tab_revisar:
             st.caption(
                 f"{len(grupo)} factura(s) de este proveedor sin colocar · {total_grupo:.2f} € en total"
             )
-            if len(grupo) > 1:
-                with st.expander(f"Ver las {len(grupo)} facturas del grupo"):
-                    for d in grupo:
-                        st.write(f"· {d['archivo']} — {d['importe'] or 0:.2f} €")
-
             texto = _texto_factura(str(ruta))
             sugeridas = [p["nombre"] for p in core.detect_properties(core.normalize_text(texto), props)]
             if actual.get("evidencia_ia"):
