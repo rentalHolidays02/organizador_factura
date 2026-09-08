@@ -1,0 +1,12 @@
+.sesion/
+__pycache__/
+.streamlit/secrets.toml
+
+# Datos reales: nunca al repo, aunque sea privado.
+*.zip
+!tests_synthetic/facturas_test.zip
+facturas_organizadas/
+salida_final/
+salida_prueba/
+identificadores.csv
+propiedades activas.csv
