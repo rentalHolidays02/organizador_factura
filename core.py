@@ -261,6 +261,17 @@ def candidate_identifiers(raw_text: str, limit: int = 15) -> list[str]:
     return sorted(vistos, key=len, reverse=True)[:limit]
 
 
+def issuer_fingerprint(raw_text: str) -> str:
+    """Cabecera del emisor. Las facturas de un mismo proveedor salen de la misma plantilla, así
+    que su primera línea con texto real las agrupa y se resuelven en bloque en vez de una a una.
+    Si el OCR ensucia la cabecera el grupo queda de uno solo, que es como funcionaba antes."""
+    for linea in (raw_text or "").splitlines():
+        norm = normalize_text(linea)
+        if len(norm) >= 4 and any(c.isalpha() for c in norm):
+            return norm[:40]
+    return ""
+
+
 def _build_property(ref: str, direccion: str, nombre_raw: str) -> dict:
     ref, direccion, nombre_raw = ref.strip(), direccion.strip(), nombre_raw.strip()
     nombre = nombre_raw or ref or direccion
@@ -336,6 +347,11 @@ def load_properties_from_api(api_key: str) -> list[dict]:
             raise ValueError(f"Lodgify devolvió un error ({exc.code}).") from exc
         items = data.get("items", [])
         for item in items:
+            # Lodgify devuelve también las que ya no se gestionan (129 de 180 en la cuenta real).
+            # Una propiedad dada de baja no puede recibir facturas, y dejarla dentro solo añade
+            # nombres parecidos contra los que equivocarse al emparejar.
+            if not item.get("is_active"):
+                continue
             ref = str(item.get("id", ""))
             direccion = ", ".join(f for f in (item.get("address"), item.get("city")) if f)
             properties.append(_build_property(ref, direccion, item.get("name") or ""))
@@ -343,12 +359,33 @@ def load_properties_from_api(api_key: str) -> list[dict]:
             break
         page += 1
     if not properties:
-        raise ValueError("Lodgify no devolvió ninguna propiedad. Revisa la API key.")
+        raise ValueError("Lodgify no devolvió ninguna propiedad activa. Revisa la API key.")
     return properties
 
 
 IDENT_ALIASES = {"identificador", "id", "codigo", "cups", "valor", "contrato"}
 PROP_ALIASES = {"propiedad", "ref", "referencia", "nombre", "name"}
+
+# Destinos que no son un piso. Un repostaje o la factura de la gestoría no pertenecen a ninguna
+# propiedad, pero tienen que salir en su propia carpeta y como su propia línea del informe.
+CATEGORIAS = ("Gastos_empresa", "Gasolina")
+
+
+def category_destinations() -> list[dict]:
+    """Las categorías se archivan y se mapean como una propiedad más, pero quedan FUERA del
+    match automático por texto: que una factura diga "gasolina" no la convierte en un repostaje.
+    Solo llegan aquí a mano o por un identificador que alguien puso en la tabla."""
+    return [
+        {
+            "ref": "",
+            "direccion": "",
+            "nombre": nombre,
+            "campos_norm": [],
+            "campos_token": [],
+            "carpeta": sanitize_folder_name(nombre),
+        }
+        for nombre in CATEGORIAS
+    ]
 
 
 def load_identifier_map(csv_source, properties: list[dict]) -> dict[str, dict]:
@@ -374,7 +411,7 @@ def load_identifier_map(csv_source, properties: list[dict]) -> dict[str, dict]:
         )
 
     destinos = {}
-    for prop in properties:
+    for prop in list(properties) + category_destinations():
         for clave in (prop["nombre"], prop["ref"]):
             clave_norm = normalize_text(clave)
             if clave_norm:
@@ -678,6 +715,8 @@ def process_invoices(
                 "confianza": confidence,
                 "importe": extract_amount(raw_text),
                 "evidencia_ia": evidencia_groq,
+                "emisor": issuer_fingerprint(raw_text),
+                "codigos": candidate_identifiers(raw_text, limit=3),
             }
         )
         if on_file_processed:

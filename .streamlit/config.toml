@@ -1,0 +1,19 @@
+[theme]
+# Papel azulado de libro de cuentas, documentos en blanco encima, tinta azul marino.
+# El ámbar marca lo que espera una decisión; el verde mar, lo ya archivado.
+base = "light"
+backgroundColor = "#EDF0F4"
+secondaryBackgroundColor = "#FFFFFF"
+textColor = "#16243D"
+primaryColor = "#D9820F"
+borderColor = "#D3DAE4"
+linkColor = "#157A72"
+baseRadius = "0.5rem"
+buttonRadius = "0.4rem"
+
+font = "IBM Plex Sans:https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&display=swap, sans-serif"
+headingFont = "Archivo:https://fonts.googleapis.com/css2?family=Archivo:wght@600;700&display=swap, sans-serif"
+codeFont = "IBM Plex Mono:https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&display=swap, monospace"
+
+greenColor = "#157A72"
+orangeColor = "#D9820F"

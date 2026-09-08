@@ -10,13 +10,38 @@ import streamlit as st
 
 import core
 
-GASTO_EMPRESA = "Gastos_empresa"
+# Destinos que no son un piso. El texto es lo que ve quien revisa; la clave es el nombre de
+# la carpeta y lo que se escribe en la tabla de códigos.
+ETIQUETA_CATEGORIA = {
+    "Gastos_empresa": "Gasto de la empresa (no es de ningún piso)",
+    "Gasolina": "Gasolina / combustible",
+}
 
 # Carpeta de trabajo fija en vez de un tempdir: recargar la página abre una sesión nueva de
 # Streamlit y reiniciarlo vacía la memoria, y volver a pasar el OCR por todo el lote cuesta
 # minutos. Aquí quedan las facturas ya organizadas y el estado de la revisión a mano.
 WORK_DIR = Path(os.environ.get("ORGANIZADOR_SESION") or Path(__file__).parent / ".sesion")
 ESTADO_JSON = WORK_DIR / "estado.json"
+
+# La tabla de códigos vive FUERA de la carpeta del lote: es lo único que se acumula trimestre a
+# trimestre, y empezar un lote nuevo no puede borrarla. Cada código que se identifica a mano se
+# añade aquí, así que el trimestre siguiente esa factura ya se coloca sola.
+CODIGOS_CSV = Path(os.environ.get("ORGANIZADOR_CODIGOS") or Path(__file__).parent / "codigos_guardados.csv")
+
+
+def _codigos_guardados() -> pd.DataFrame | None:
+    if not CODIGOS_CSV.exists():
+        return None
+    try:
+        return pd.read_csv(CODIGOS_CSV, dtype=str, sep=None, engine="python").fillna("")
+    except Exception:
+        return None
+
+
+def _anadir_codigos(nuevos: list[dict]) -> None:
+    previo = _codigos_guardados()
+    tabla = pd.concat([previo, pd.DataFrame(nuevos)], ignore_index=True) if previo is not None else pd.DataFrame(nuevos)
+    tabla.to_csv(CODIGOS_CSV, index=False, sep=";")
 
 
 def _guardar_estado(resultado: dict) -> None:
@@ -44,6 +69,7 @@ def _texto_factura(ruta: str) -> str:
     except Exception:
         return ""
 
+
 def _secreto(nombre: str) -> str:
     """En Streamlit Cloud las claves llegan por st.secrets, en local por variable de entorno."""
     try:
@@ -52,7 +78,7 @@ def _secreto(nombre: str) -> str:
         return ""
 
 
-@st.cache_data(ttl=3600, show_spinner="Cargando propiedades de Lodgify...")
+@st.cache_data(ttl=3600, show_spinner="Cargando pisos de Lodgify...")
 def _propiedades_lodgify(api_key: str) -> list[dict]:
     return core.load_properties_from_api(api_key)
 
@@ -61,110 +87,36 @@ GROQ_API_KEY = _secreto("GROQ_API_KEY")
 LODGIFY_API_KEY = _secreto("LODGIFY_API_KEY")
 compartido = _compartido()
 
-st.set_page_config(page_title="Organizador de facturas", layout="wide")
-st.title("Organizador de facturas por propiedad")
-if GROQ_API_KEY:
-    st.caption(
-        "Procesamiento local. Las facturas que no se identifican solas se mandan a Groq (IA) "
-        "como último recurso — es lo único que sale de tu máquina."
-    )
-else:
-    st.caption("Todo el procesamiento ocurre en local: nada se sube a servicios externos.")
+st.set_page_config(page_title="Facturas por propiedad", layout="wide", page_icon="🗂️")
 
 properties = []
+error_pisos = ""
 if not LODGIFY_API_KEY:
-    st.error("Falta configurar el secreto LODGIFY_API_KEY.")
+    error_pisos = "Falta configurar la clave LODGIFY_API_KEY para leer los pisos de Lodgify."
 else:
     try:
         properties = _propiedades_lodgify(LODGIFY_API_KEY)
-        st.caption(f"{len(properties)} propiedades cargadas de Lodgify.")
     except Exception as exc:
-        st.error(f"No se pudieron cargar las propiedades de Lodgify: {exc}")
+        error_pisos = f"Lodgify no respondió: {exc}"
 
-col1, col2 = st.columns(2)
-with col1:
-    zip_file = st.file_uploader("ZIP de facturas (PDF/JPG/PNG)", type=["zip"])
-with col2:
-    ident_file = st.file_uploader(
-        "CSV de identificadores (opcional)",
-        type=["csv"],
-        help="Tabla identificador -> propiedad (CUPS, nº de contrato, de contador). "
-        "Es lo único que permite clasificar las facturas de suministros.",
+with st.sidebar:
+    st.subheader("Estado")
+    if properties:
+        st.success(f"{len(properties)} pisos leídos de Lodgify")
+    else:
+        st.error(error_pisos)
+    st.caption(
+        "Las facturas se leen en este ordenador. Las que no se identifican solas se consultan "
+        "a una IA (Groq)." if GROQ_API_KEY else
+        "Las facturas se leen en este ordenador. No se sube nada a servicios externos."
     )
-
-threshold = st.slider(
-    "Umbral de coincidencia difusa (fuzzy match)",
-    min_value=50,
-    max_value=100,
-    value=core.DEFAULT_FUZZY_THRESHOLD,
-    help="Por debajo de este porcentaje de similitud, una factura no se asigna por fuzzy match.",
-)
-
-ruta_carpeta = st.text_input(
-    "...o ruta de una carpeta ya en disco",
-    help="Sirve una unidad de Google Drive montada con Drive para escritorio "
-    "(por ejemplo G:/Mi unidad/facturas/2025-Q4). Se lee de ahi; los originales no se tocan.",
-)
-
-ruta_salida = st.text_input(
-    "Carpeta de Drive donde guardar el resultado (opcional)",
-    help="Si la dejas vacía, el resultado solo queda en el ZIP de descarga. Rellénala "
-    "(p.ej. G:/Mi unidad/facturas/salida/2025-2026) para que quede ya sincronizado en Drive.",
-)
-
-origen_ok = bool(zip_file) or bool(ruta_carpeta.strip())
-procesar = st.button("Procesar facturas", disabled=not (origen_ok and properties))
-
-if procesar and origen_ok and properties:
-    fuente_carpeta = Path(ruta_carpeta.strip()) if ruta_carpeta.strip() else None
-    if fuente_carpeta and not fuente_carpeta.is_dir():
-        st.error(f"No existe la carpeta: {fuente_carpeta}")
-        st.stop()
-    with st.spinner("Procesando facturas..."):
-        # Un lote nuevo reemplaza al anterior: si no, las facturas del trimestre pasado
-        # seguirían en las carpetas y en el ZIP de descarga.
-        shutil.rmtree(WORK_DIR, ignore_errors=True)
-        work_dir = WORK_DIR
-        work_dir.mkdir(parents=True, exist_ok=True)
-        if fuente_carpeta:
-            fuente = fuente_carpeta
-        else:
-            fuente = work_dir / "facturas.zip"
-            fuente.write_bytes(zip_file.getvalue())
-        output_dir = Path(ruta_salida.strip()) if ruta_salida.strip() else work_dir / "salida"
-
-        progreso = st.empty()
-        contador = {"n": 0}
-
-        def _avisar_progreso(nombre_archivo: str) -> None:
-            contador["n"] += 1
-            progreso.text(f"Procesada factura {contador['n']}: {nombre_archivo}")
-
-        try:
-            detalle, properties = core.process_invoices(
-                fuente,
-                properties,
-                output_dir,
-                threshold=threshold,
-                groq_api_key=GROQ_API_KEY,
-                on_file_processed=_avisar_progreso,
-                identifier_csv=ident_file,
-            )
-        except ValueError as exc:
-            st.error(str(exc))
-            st.stop()
-        progreso.empty()
-
-        compartido["resultado"] = {
-            "detalle": detalle,
-            "properties": properties,
-            "work_dir": str(work_dir),
-            "output_dir": str(output_dir),
-            "identificadores_nuevos": [],
-            "elecciones": {},
-        }
-        st.session_state["pos_revisar"] = 0
-        _guardar_estado(compartido["resultado"])
+    if ESTADO_JSON.exists():
+        st.divider()
+        if st.button("Empezar un lote nuevo", width="stretch"):
+            shutil.rmtree(WORK_DIR, ignore_errors=True)
+            compartido["resultado"] = None
+            st.rerun()
+        st.caption("Borra el lote actual y su revisión. Descarga antes el resultado.")
 
 if compartido["resultado"] is None and ESTADO_JSON.exists():
     guardado = json.loads(ESTADO_JSON.read_text(encoding="utf-8"))
@@ -173,205 +125,338 @@ if compartido["resultado"] is None and ESTADO_JSON.exists():
         compartido["resultado"] = guardado
 
 resultado = compartido["resultado"]
-if resultado:
-    detalle = resultado["detalle"]
-    output_dir = Path(resultado["output_dir"])
-    resumen_df = core.build_resumen(detalle)
 
-    sin_identificar = [d for d in detalle if d["propiedad"] == "Sin identificar"]
-    if sin_identificar:
+# ---------------------------------------------------------------- paso 1: cargar el lote
+if resultado is None:
+    st.title("Facturas por propiedad")
+    st.markdown(
+        "Sube el ZIP con las facturas del trimestre. Te lo devuelve ordenado en una carpeta "
+        "por piso y por mes, con el Excel de gastos hecho."
+    )
+    zip_file = st.file_uploader(
+        "ZIP de facturas del trimestre", type=["zip"],
+        help="Tal cual llega: PDF, JPG o PNG mezclados dentro.",
+    )
+
+    guardados = _codigos_guardados()
+    if guardados is not None:
+        # Una fila con el CUPS pero sin piso no sirve para nada: hay que contar las que de
+        # verdad colocan una factura, no las filas del CSV.
+        utiles = len(core.load_identifier_map(CODIGOS_CSV, properties)) if properties else 0
+        sin_asignar = len(guardados) - utiles
+        st.success(f"Tabla de códigos guardada: {utiles} código(s) listos para colocar facturas solos.")
+        if sin_asignar > 0:
+            st.info(
+                f"Hay {sin_asignar} código(s) más en la tabla sin piso asignado: no sirven "
+                "todavía. Se van rellenando solos según coloques esas facturas a mano aquí."
+            )
+        with st.expander("Cambiar la tabla de códigos"):
+            nueva = st.file_uploader("Sustituirla por otro CSV", type=["csv"], key="sustituir")
+            if nueva is not None:
+                CODIGOS_CSV.write_bytes(nueva.getvalue())
+                st.rerun()
+    else:
         st.warning(
-            f"{len(sin_identificar)} factura(s) no se pudieron asociar a ninguna propiedad "
-            "y quedaron en 'Sin_identificar'. Revísalas manualmente."
+            "No hay tabla de códigos. Las facturas de luz, agua y gas no dicen de qué piso "
+            "son: solo traen el CUPS o el nº de contrato, así que sin esa tabla acaban todas "
+            "en la lista de colocar a mano."
         )
-
-    groq_matches = [d for d in detalle if d["metodo_match"].startswith("groq")]
-    if groq_matches:
-        st.warning(
-            f"De esas, {len(groq_matches)} tienen una sugerencia de propiedad hecha por IA (Groq) — "
-            "quedan igual dentro de 'Sin_identificar' (no se archivan ni se suman al gasto de ninguna "
-            "propiedad), porque el modelo gratuito a veces se equivoca con confianza alta en facturas "
-            "ambiguas. Mirá la columna 'metodo_match' y 'evidencia_ia' en el detalle para decidir si "
-            "la sugerencia es correcta y mover el archivo a mano."
-        )
-
-    if sin_identificar:
-        st.subheader(f"Revisar a mano ({len(sin_identificar)} pendientes)")
-        nombres = [d["archivo"] for d in sin_identificar]
-        elecciones = resultado.setdefault("elecciones", {})
-        # Antes se marcaba una sola propiedad por factura y se guardaba como texto suelto.
-        for archivo, marcado in elecciones.items():
-            if not isinstance(marcado, list):
-                elecciones[archivo] = [marcado] if marcado else []
-        # Al asignar una factura desaparece de la lista, así que quedarse en la misma posición
-        # ya deja seleccionada la siguiente pendiente.
-        pos = st.session_state.get("pos_revisar", 0) % len(nombres)
-        revisar = st.selectbox(
-            "Factura",
-            nombres,
-            index=pos,
-            format_func=lambda n: (
-                f"{nombres.index(n) + 1}/{len(nombres)} — "
-                f"{'✔ ' + ' + '.join(elecciones[n]) + ' — ' if elecciones.get(n) else ''}{n[:70]}"
-            ),
-        )
-        pos = nombres.index(revisar)
-        st.session_state["pos_revisar"] = pos
-
-        col_ant, col_sig, _ = st.columns([1, 1, 6])
-        if col_ant.button("◀ Anterior", use_container_width=True):
-            st.session_state["pos_revisar"] = (pos - 1) % len(nombres)
+        subida = st.file_uploader("Tabla de códigos (CSV)", type=["csv"])
+        if subida is not None:
+            CODIGOS_CSV.write_bytes(subida.getvalue())
             st.rerun()
-        if col_sig.button("Siguiente ▶", use_container_width=True):
-            st.session_state["pos_revisar"] = (pos + 1) % len(nombres)
+        st.caption(
+            "Si no la tienes, sube el ZIP igual: según vayas colocando facturas a mano, la app "
+            "va guardando los códigos y el trimestre que viene se colocan solas."
+        )
+
+    if st.button(
+        "Ordenar las facturas", type="primary",
+        disabled=not (zip_file and properties), width="stretch",
+    ):
+        with st.status("Ordenando las facturas...", expanded=True) as estado:
+            # Un lote nuevo reemplaza al anterior: si no, las facturas del trimestre pasado
+            # seguirían en las carpetas y en el ZIP de descarga.
+            shutil.rmtree(WORK_DIR, ignore_errors=True)
+            WORK_DIR.mkdir(parents=True, exist_ok=True)
+            fuente = WORK_DIR / "facturas.zip"
+            fuente.write_bytes(zip_file.getvalue())
+            output_dir = WORK_DIR / "salida"
+
+            progreso = st.empty()
+            contador = {"n": 0}
+
+            def _avisar_progreso(nombre_archivo: str) -> None:
+                contador["n"] += 1
+                progreso.text(f"{contador['n']} — {nombre_archivo}")
+
+            try:
+                detalle, properties = core.process_invoices(
+                    fuente, properties, output_dir,
+                    groq_api_key=GROQ_API_KEY,
+                    on_file_processed=_avisar_progreso,
+                    identifier_csv=CODIGOS_CSV if CODIGOS_CSV.exists() else None,
+                )
+            except ValueError as exc:
+                estado.update(label="No se pudo leer el lote", state="error")
+                st.error(str(exc))
+                st.stop()
+            estado.update(label=f"{len(detalle)} facturas leídas", state="complete")
+
+        compartido["resultado"] = {
+            "detalle": detalle,
+            "properties": properties,
+            "work_dir": str(WORK_DIR),
+            "output_dir": str(output_dir),
+            "identificadores_nuevos": [],
+            "elecciones": {},
+        }
+        _guardar_estado(compartido["resultado"])
+        st.rerun()
+    st.stop()
+
+# ---------------------------------------------------------------- lote ya procesado
+detalle = resultado["detalle"]
+props = resultado["properties"]
+output_dir = Path(resultado["output_dir"])
+pendientes = [d for d in detalle if d["propiedad"] == "Sin identificar"]
+colocadas = len(detalle) - len(pendientes)
+
+st.title("Facturas por propiedad")
+c1, c2, c3 = st.columns(3)
+c1.metric("Facturas del lote", len(detalle))
+c2.metric("Ya colocadas", colocadas)
+c3.metric("Faltan por colocar", len(pendientes))
+st.progress(colocadas / len(detalle) if detalle else 0.0)
+
+etiqueta_prop = {p["nombre"]: f"{p['nombre']} — {p['direccion']}" for p in props}
+carpeta_destino = {p["nombre"]: p["carpeta"] for p in props}
+carpeta_destino.update({c["nombre"]: c["carpeta"] for c in core.category_destinations()})
+
+
+def _etiqueta(nombre: str) -> str:
+    return ETIQUETA_CATEGORIA.get(nombre) or etiqueta_prop.get(nombre, nombre)
+
+
+def _colocar(filas_archivos: list[str], destinos: list[str], importes: list[float], codigo: str | None) -> None:
+    """Mueve cada factura a la carpeta de su destino y actualiza el detalle. Una factura
+    repartida entre varios pisos se archiva en la carpeta de cada uno: es el mismo documento,
+    y quien abra la carpeta de una villa tiene que encontrarlo ahí."""
+    for archivo in filas_archivos:
+        fila = next(d for d in detalle if d["archivo"] == archivo and d["propiedad"] == "Sin identificar")
+        ruta = next(output_dir.rglob(archivo), None)
+        if ruta is None or not ruta.exists():
+            continue
+        reparto = importes if len(destinos) > 1 else [fila["importe"]]
+        metodo = "manual" if len(destinos) == 1 else f"manual (repartida entre {len(destinos)})"
+        filas = [fila] + [dict(fila) for _ in destinos[1:]]
+        for i, (destino, importe, f) in enumerate(zip(destinos, reparto, filas)):
+            nuevo_dir = output_dir / carpeta_destino[destino] / ruta.parent.name
+            nuevo_dir.mkdir(parents=True, exist_ok=True)
+            mover = shutil.move if i == len(destinos) - 1 else shutil.copy2
+            mover(str(ruta), str(nuevo_dir / ruta.name))
+            f["propiedad"] = destino
+            f["metodo_match"] = metodo
+            f["confianza"] = 100.0
+            f["importe"] = importe
+            if codigo:
+                fila_codigo = {"identificador": codigo, "propiedad": destino}
+                resultado["identificadores_nuevos"].append(fila_codigo)
+                _anadir_codigos([fila_codigo])
+        detalle.extend(filas[1:])
+    _guardar_estado(resultado)
+
+
+def _grupos_pendientes() -> list[tuple[str, list[dict]]]:
+    """Las facturas de un mismo proveedor salen de la misma plantilla y llevan la misma
+    cabecera, así que caen juntas. Ordenarlas por grupo ahorra saltar de contexto en cada
+    factura, y las del mismo proveedor de empresa (Vodafone, Stripe...) se colocan de una vez."""
+    grupos: dict[str, list[dict]] = {}
+    for d in pendientes:
+        grupos.setdefault(d.get("emisor") or "(cabecera ilegible)", []).append(d)
+    return sorted(grupos.items(), key=lambda kv: (-len(kv[1]), kv[0]))
+
+
+tab_revisar, tab_resumen, tab_descargar = st.tabs(
+    [f"Colocar las que faltan ({len(pendientes)})", "Resumen por piso", "Descargar"],
+    on_change="rerun", key="pestana",
+)
+
+# ---------------------------------------------------------------- paso 2: colocar a mano
+with tab_revisar:
+    if not pendientes:
+        st.success("Todas las facturas están colocadas. Ve a **Descargar**.")
+    else:
+        grupos = _grupos_pendientes()
+        pos = st.session_state.get("grupo_pos", 0) % len(grupos)
+        emisor, grupo = grupos[pos]
+
+        nav_izq, nav_der, nav_sel = st.columns([1, 1, 6])
+        if nav_izq.button("Anterior", width="stretch"):
+            st.session_state["grupo_pos"] = (pos - 1) % len(grupos)
             st.rerun()
-        ruta = next(output_dir.rglob(revisar), None)
+        if nav_der.button("Siguiente", width="stretch"):
+            st.session_state["grupo_pos"] = (pos + 1) % len(grupos)
+            st.rerun()
+        nav_sel.caption(f"Grupo {pos + 1} de {len(grupos)} · {len(pendientes)} facturas sueltas")
+
+        actual = grupo[0]
+        ruta = next(output_dir.rglob(actual["archivo"]), None)
         if ruta is None:
-            st.error(f"No se encuentra {revisar} en la salida.")
+            st.error(f"No se encuentra {actual['archivo']}. Empieza un lote nuevo desde la barra lateral.")
             st.stop()
 
-        col_prev, col_form = st.columns([3, 2])
-        with col_prev:
-            try:
-                st.image(core.render_preview(ruta), use_container_width=True)
-            except Exception as exc:
-                st.warning(f"No se puede previsualizar este archivo: {exc}")
+        col_doc, col_form = st.columns([3, 2], gap="large")
+        with col_doc:
+            with st.container(border=True):
+                st.caption(actual["archivo"])
+                try:
+                    st.image(core.render_preview(ruta), width="stretch")
+                except Exception as exc:
+                    st.warning(f"Este archivo no se puede previsualizar: {exc}")
 
         with col_form:
-            props = resultado["properties"]
-            # El nombre por sí solo no distingue: hay varias "Lucena del Cid" y varias
-            # "Anclamar". La dirección es lo que se compara contra la factura que tienes delante.
-            etiqueta = {p["nombre"]: f"{p['nombre']}  —  {p['direccion']}" for p in props}
-            opciones = [GASTO_EMPRESA] + [p["nombre"] for p in props]
-            texto = _texto_factura(str(ruta))
-            sugeridas = [
-                p["nombre"] for p in core.detect_properties(core.normalize_text(texto), props)
-            ]
-            # Lo marcado se guarda aunque no llegues a pulsar Asignar: con 72 facturas se
-            # navega adelante y atrás, y volver a una ya mirada tiene que devolverte tu elección.
-            marcado = elecciones.get(revisar, sugeridas)
-            destinos = st.multiselect(
-                "Pertenece a",
-                opciones,
-                default=[n for n in marcado if n in opciones],
-                format_func=lambda n: etiqueta.get(n, n),
-                help="Se pueden marcar varias: una factura de mantenimiento de piscinas cubre "
-                "cuatro villas en la misma hoja.",
+            st.subheader(emisor.title() if emisor != "(cabecera ilegible)" else "Sin cabecera legible")
+            total_grupo = sum(d["importe"] or 0.0 for d in grupo)
+            st.caption(
+                f"{len(grupo)} factura(s) de este proveedor sin colocar · {total_grupo:.2f} € en total"
             )
-            if destinos != marcado:
-                with compartido["lock"]:
-                    elecciones[revisar] = destinos
-                    _guardar_estado(resultado)
-            if len(sugeridas) > 1:
-                st.info(
-                    f"Esta factura nombra {len(sugeridas)} propiedades. Comprueba que no falte "
-                    "ninguna: las que se nombran con palabras que comparten varias propiedades "
-                    "(p.ej. 'Grao', 'Benicasim') no se detectan solas."
+            if len(grupo) > 1:
+                with st.expander(f"Ver las {len(grupo)} facturas del grupo"):
+                    for d in grupo:
+                        st.write(f"· {d['archivo']} — {d['importe'] or 0:.2f} €")
+
+            texto = _texto_factura(str(ruta))
+            sugeridas = [p["nombre"] for p in core.detect_properties(core.normalize_text(texto), props)]
+            if actual.get("evidencia_ia"):
+                st.info(f"La IA apunta a: {actual['evidencia_ia']}")
+
+            # Nada viene premarcado a propósito: estas coincidencias salen de buscar el nombre
+            # del piso dentro del texto, y una factura que solo dice "CASTELLON" engancha con
+            # cualquier piso de Castellón. Marcarlas solas invitaría a colocar mal de un clic.
+            elegidas = []
+            if sugeridas:
+                elegidas = st.pills(
+                    "Nombres que aparecen en el texto (compruébalo antes de fiarte)",
+                    sugeridas, selection_mode="multi", format_func=_etiqueta,
                 )
 
-            fila = next(d for d in detalle if d["archivo"] == revisar)
-            importes = [fila["importe"]]
+            categoria = st.pills(
+                "¿Es un gasto general?", list(core.CATEGORIAS), format_func=_etiqueta,
+                help="No es de ningún piso: repostajes, la gestoría, Vodafone, Stripe...",
+            )
+            pisos = st.multiselect(
+                "¿O de qué piso es?", [p["nombre"] for p in props],
+                default=[n for n in elegidas if n != categoria],
+                format_func=_etiqueta,
+                placeholder="Escribe para buscar el piso",
+                help="Puedes marcar varios: una factura de mantenimiento de piscinas cubre "
+                "cuatro villas en la misma hoja.",
+            )
+            destinos = [categoria] if categoria else pisos
+            if categoria and pisos:
+                st.warning("Elige una cosa o la otra: o es gasto general, o es de un piso.")
+                destinos = []
+
+            importes = [actual["importe"]]
             if len(destinos) > 1:
-                st.caption(
-                    f"Reparto del importe de la factura ({fila['importe'] or 0:.2f} €). Viene "
-                    "dividido a partes iguales; corrígelo si la factura detalla lo de cada una."
-                )
-                a_partes = (fila["importe"] or 0.0) / len(destinos)
+                a_partes = (actual["importe"] or 0.0) / len(destinos)
+                st.caption(f"Reparto de {actual['importe'] or 0:.2f} €. Corrígelo si la factura lo detalla.")
                 importes = [
                     st.number_input(
-                        f"€ de {d}", min_value=0.0, value=round(a_partes, 2), step=1.0,
-                        key=f"importe_{revisar}_{d}",
+                        _etiqueta(d), min_value=0.0, value=round(a_partes, 2), step=1.0,
+                        key=f"importe_{actual['archivo']}_{d}",
                     )
                     for d in destinos
                 ]
 
-            codigos = core.candidate_identifiers(texto)
             codigo = None
-            if len(destinos) == 1 and destinos[0] != GASTO_EMPRESA:
-                st.caption(
-                    "Si es una factura de suministro, elige el código del punto de suministro "
-                    "(CUPS, contrato o contador). Se guarda en identificadores.csv y a partir de "
-                    "ahí esta factura se clasifica sola cada trimestre."
-                )
-                codigo = st.radio(
-                    "Código que identifica el suministro",
-                    ["(ninguno, es un gasto puntual)"] + codigos,
-                    index=0,
-                )
-                if codigo.startswith("(ninguno"):
-                    codigo = None
-
-            if st.button("Asignar", disabled=not destinos, type="primary"):
-                with compartido["lock"]:
-                    # Otra persona pudo asignar esta misma factura mientras la mirabas: el
-                    # archivo ya no esta donde lo dejo el proceso y shutil.move reventaria.
-                    if fila["propiedad"] != "Sin identificar" or not ruta.exists():
-                        st.warning(
-                            f"{revisar} ya la asigno otra persona a {fila['propiedad']}. "
-                            "Recarga la pagina para ver la lista al dia."
-                        )
-                        st.stop()
-                    # Una factura repartida se archiva en la carpeta de cada propiedad: es el mismo
-                    # documento, y quien abra la carpeta de una villa tiene que encontrarlo ahí.
-                    # La última se lleva el original y las demás una copia.
-                    metodo = (
-                        "manual"
-                        if len(destinos) == 1
-                        else f"manual (repartida entre {len(destinos)})"
+            if len(destinos) == 1:
+                codigos = core.candidate_identifiers(texto)
+                if codigos:
+                    elegido = st.selectbox(
+                        "¿Hay un código que identifique siempre a este destino?",
+                        ["No, es un gasto suelto"] + codigos,
+                        help="El CUPS de la luz, el nº de contrato del agua, la tarjeta de "
+                        "gasolina... Se guarda en la tabla de códigos y el trimestre que viene "
+                        "estas facturas se colocan solas.",
                     )
-                    filas = [fila] + [dict(fila) for _ in destinos[1:]]
-                    for i, (destino, importe, f) in enumerate(zip(destinos, importes, filas)):
-                        carpeta = (
-                            GASTO_EMPRESA
-                            if destino == GASTO_EMPRESA
-                            else next(p["carpeta"] for p in props if p["nombre"] == destino)
-                        )
-                        nuevo_dir = output_dir / carpeta / ruta.parent.name
-                        nuevo_dir.mkdir(parents=True, exist_ok=True)
-                        mover = shutil.move if i == len(destinos) - 1 else shutil.copy2
-                        mover(str(ruta), str(nuevo_dir / ruta.name))
+                    codigo = None if elegido.startswith("No,") else elegido
 
-                        f["propiedad"] = destino
-                        f["metodo_match"] = metodo
-                        f["confianza"] = 100.0
-                        f["importe"] = importe
-                        if codigo:
-                            resultado["identificadores_nuevos"].append(
-                                {"identificador": codigo, "propiedad": destino}
-                            )
-                    detalle.extend(filas[1:])
-                    _guardar_estado(resultado)
+            # Empresa y gasolina se deciden por proveedor, no por factura: todo lo que emite
+            # Vodafone o la gasolinera va al mismo sitio. Un piso concreto solo se aplica en
+            # bloque si todas comparten el código del suministro, que prueba que son del mismo.
+            comun = (
+                set.intersection(*[set(d.get("codigos") or []) for d in grupo])
+                if len(grupo) > 1 else set()
+            )
+            en_bloque = (len(destinos) == 1 and destinos[0] in core.CATEGORIAS) or bool(comun)
+
+            b1, b2 = st.columns(2)
+            if b1.button("Colocar esta", type="primary", disabled=not destinos, width="stretch"):
+                with compartido["lock"]:
+                    _colocar([actual["archivo"]], destinos, importes, codigo)
+                st.rerun()
+            if len(grupo) > 1:
+                if b2.button(
+                    f"Colocar las {len(grupo)}", disabled=not (destinos and en_bloque),
+                    width="stretch",
+                    help=None if en_bloque else
+                    "Solo se pueden colocar de golpe si son gasto de empresa o si comparten "
+                    "el código del punto de suministro.",
+                ):
+                    with compartido["lock"]:
+                        _colocar([d["archivo"] for d in grupo], destinos[:1], importes, codigo)
                     st.rerun()
 
-        with st.expander("Texto leído de esta factura"):
-            st.text(texto[:3000] or "(sin texto: ni capa de texto ni OCR legible)")
+            with st.expander("Texto leído de esta factura"):
+                st.text(texto[:3000] or "(sin texto: ni capa de texto ni OCR legible)")
 
-    st.subheader("Resumen por propiedad")
-    st.dataframe(resumen_df, use_container_width=True)
-
-    st.subheader("Detalle de facturas")
-    st.dataframe(
-        [{k: v for k, v in d.items() if k != "texto"} for d in detalle],
-        use_container_width=True,
-    )
-
-    core.build_excel_report(detalle, resumen_df, output_dir / "informe_gastos.xlsx")
-    zip_path = Path(resultado["work_dir"]) / "facturas_organizadas.zip"
-    core.zip_folder(output_dir, zip_path)
-    st.download_button(
-        "Descargar ZIP organizado + informe Excel",
-        data=zip_path.read_bytes(),
-        file_name="facturas_organizadas.zip",
-        mime="application/zip",
-    )
-
-    nuevos = resultado["identificadores_nuevos"]
-    if nuevos:
-        st.download_button(
-            f"Descargar identificadores.csv con {len(nuevos)} fila(s) nueva(s)",
-            data=pd.DataFrame(nuevos).to_csv(index=False, sep=";").encode("utf-8"),
-            file_name="identificadores_nuevos.csv",
-            mime="text/csv",
-            help="Pégalas en tu identificadores.csv. El trimestre que viene esas facturas "
-            "se clasifican solas.",
+# ---------------------------------------------------------------- resumen
+with tab_resumen:
+    resumen_df = core.build_resumen(detalle)
+    st.dataframe(resumen_df, width="stretch", hide_index=True)
+    with st.expander("Ver factura por factura"):
+        st.dataframe(
+            pd.DataFrame(detalle)[["archivo", "propiedad", "importe", "metodo_match"]].rename(
+                columns={"metodo_match": "cómo se colocó", "propiedad": "piso"}
+            ),
+            width="stretch", hide_index=True,
         )
+
+# ---------------------------------------------------------------- descargas
+with tab_descargar:
+    if pendientes:
+        st.warning(
+            f"Faltan {len(pendientes)} facturas por colocar. Puedes descargar igual: quedan "
+            "en la carpeta 'Sin_identificar'."
+        )
+    # Comprimir el lote entero cuesta segundos: solo se rehace al abrir esta pestaña, no en
+    # cada factura que se coloca.
+    if tab_descargar.open:
+        with st.spinner("Preparando el archivo..."):
+            resumen_df = core.build_resumen(detalle)
+            core.build_excel_report(detalle, resumen_df, output_dir / "informe_gastos.xlsx")
+            zip_path = Path(resultado["work_dir"]) / "facturas_organizadas.zip"
+            core.zip_folder(output_dir, zip_path)
+        st.download_button(
+            "Descargar todo ordenado (ZIP + Excel)", data=zip_path.read_bytes(),
+            file_name="facturas_organizadas.zip", mime="application/zip",
+            type="primary", width="stretch",
+        )
+        st.caption("Una carpeta por piso, dentro una por mes, y el Excel de gastos en la raíz.")
+
+        guardados = _codigos_guardados()
+        if guardados is not None:
+            st.divider()
+            nuevos = len(resultado["identificadores_nuevos"])
+            st.markdown(
+                f"**Tabla de códigos: {len(guardados)} código(s)**"
+                + (f", {nuevos} identificado(s) en este lote." if nuevos else ".")
+                + " Ya está guardada; no hace falta volver a subirla el trimestre que viene."
+            )
+            st.download_button(
+                "Descargar la tabla de códigos (copia de seguridad)",
+                data=CODIGOS_CSV.read_bytes(),
+                file_name="identificadores.csv", mime="text/csv", width="stretch",
+            )
