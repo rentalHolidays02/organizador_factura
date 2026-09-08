@@ -28,6 +28,14 @@ ESTADO_JSON = WORK_DIR / "estado.json"
 # añade aquí, así que el trimestre siguiente esa factura ya se coloca sola.
 CODIGOS_CSV = Path(os.environ.get("ORGANIZADOR_CODIGOS") or Path(__file__).parent / "codigos_guardados.csv")
 
+# Pisos que la empresa alquila pero que no están dados de alta en Lodgify (p.ej. porque el
+# dueño no usa esa plataforma). Se guardan aparte, también fuera del contenedor, y se suman a
+# los de Lodgify: mismo trato en el desplegable, en el emparejamiento por texto y en la tabla
+# de códigos. A diferencia de Gastos_empresa/Gasolina, SÍ participan del matching automático.
+PROPIEDADES_EXTRA_CSV = Path(
+    os.environ.get("ORGANIZADOR_PROPIEDADES_EXTRA") or Path(__file__).parent / "propiedades_extra.csv"
+)
+
 
 def _codigos_guardados() -> pd.DataFrame | None:
     if not CODIGOS_CSV.exists():
@@ -42,6 +50,22 @@ def _anadir_codigos(nuevos: list[dict]) -> None:
     previo = _codigos_guardados()
     tabla = pd.concat([previo, pd.DataFrame(nuevos)], ignore_index=True) if previo is not None else pd.DataFrame(nuevos)
     tabla.to_csv(CODIGOS_CSV, index=False, sep=";")
+
+
+def _propiedades_extra() -> list[dict]:
+    if not PROPIEDADES_EXTRA_CSV.exists():
+        return []
+    try:
+        return core.load_properties(PROPIEDADES_EXTRA_CSV)
+    except Exception:
+        return []
+
+
+def _anadir_propiedad_extra(nombre: str, direccion: str) -> None:
+    fila = pd.DataFrame([{"ref": nombre, "direccion": direccion, "nombre": nombre}])
+    previo = pd.read_csv(PROPIEDADES_EXTRA_CSV, dtype=str, sep=";") if PROPIEDADES_EXTRA_CSV.exists() else None
+    tabla = pd.concat([previo, fila], ignore_index=True) if previo is not None else fila
+    tabla.to_csv(PROPIEDADES_EXTRA_CSV, index=False, sep=";")
 
 
 def _guardar_estado(resultado: dict) -> None:
@@ -99,10 +123,16 @@ else:
     except Exception as exc:
         error_pisos = f"Lodgify no respondió: {exc}"
 
+extra = _propiedades_extra()
+properties = properties + extra
+
 with st.sidebar:
     st.subheader("Estado")
     if properties:
-        st.success(f"{len(properties)} pisos leídos de Lodgify")
+        texto_estado = f"{len(properties) - len(extra)} pisos leídos de Lodgify"
+        if extra:
+            texto_estado += f" + {len(extra)} piso(s) manual(es)"
+        st.success(texto_estado)
     else:
         st.error(error_pisos)
     st.caption(
@@ -137,6 +167,22 @@ if resultado is None:
         "ZIP de facturas del trimestre", type=["zip"],
         help="Tal cual llega: PDF, JPG o PNG mezclados dentro.",
     )
+
+    with st.expander(f"Pisos que no están en Lodgify ({len(extra)})"):
+        st.caption(
+            "Se alquilan igual que los demás pero el dueño no los tiene dados de alta en "
+            "Lodgify. Se tratan como un piso más: carpeta propia, y entran en la búsqueda "
+            "automática del nombre dentro de la factura."
+        )
+        if extra:
+            for p in extra:
+                st.write(f"· {p['nombre']}" + (f" — {p['direccion']}" if p["direccion"] else ""))
+        with st.form("nueva_propiedad_extra", clear_on_submit=True):
+            nombre_nuevo = st.text_input("Nombre del piso")
+            direccion_nueva = st.text_input("Dirección (opcional, ayuda a identificarlo)")
+            if st.form_submit_button("Añadir piso") and nombre_nuevo.strip():
+                _anadir_propiedad_extra(nombre_nuevo.strip(), direccion_nueva.strip())
+                st.rerun()
 
     guardados = _codigos_guardados()
     if guardados is not None:
