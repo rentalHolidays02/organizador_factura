@@ -169,13 +169,29 @@ with st.sidebar:
         )
         for p in extra:
             etiqueta = p["nombre"] + (f" — {p['direccion']}" if p["direccion"] else "")
-            col_txt, col_del = st.columns([4, 1])
             # Recortada solo para mostrar: un pegado accidental (una fila de Excel entera,
             # con DNI o teléfono) no se queda pegado en pantalla esperando a que alguien lo lea.
-            col_txt.write(f"· {etiqueta[:70]}{'…' if len(etiqueta) > 70 else ''}")
-            if col_del.button("✕", key=f"borrar_extra_{p['nombre']}", help="Quitar este piso"):
-                _borrar_propiedad_extra(p["nombre"])
-                st.rerun()
+            etiqueta_corta = f"{etiqueta[:70]}{'…' if len(etiqueta) > 70 else ''}"
+            clave_confirmar = f"confirmar_borrar_{p['nombre']}"
+            if st.session_state.get(clave_confirmar):
+                # Un piso dado de alta a propósito no se quita con un solo clic: hace falta
+                # confirmar, para que un ✕ pulsado sin querer no se lleve por delante algo
+                # que sí hacía falta.
+                st.warning(f"¿Quitar \"{etiqueta_corta}\"?")
+                c1, c2 = st.columns(2)
+                if c1.button("Sí, quitar", key=f"si_{p['nombre']}", width="stretch"):
+                    _borrar_propiedad_extra(p["nombre"])
+                    st.session_state.pop(clave_confirmar, None)
+                    st.rerun()
+                if c2.button("Cancelar", key=f"no_{p['nombre']}", width="stretch"):
+                    st.session_state.pop(clave_confirmar, None)
+                    st.rerun()
+            else:
+                col_txt, col_del = st.columns([4, 1])
+                col_txt.write(f"· {etiqueta_corta}")
+                if col_del.button("✕", key=f"borrar_extra_{p['nombre']}", help="Quitar este piso"):
+                    st.session_state[clave_confirmar] = True
+                    st.rerun()
         with st.form("nueva_propiedad_extra", clear_on_submit=True):
             nombre_nuevo = st.text_input("Nombre del piso")
             direccion_nueva = st.text_input("Dirección (opcional, ayuda a identificarlo)")
@@ -288,6 +304,7 @@ if resultado is None:
             "output_dir": str(output_dir),
             "identificadores_nuevos": [],
             "elecciones": {},
+            "ultima_accion": None,
         }
         _guardar_estado(compartido["resultado"])
         st.rerun()
@@ -322,20 +339,36 @@ def _etiqueta(nombre: str) -> str:
 def _colocar(filas_archivos: list[str], destinos: list[str], importes: list[float], codigo: str | None) -> None:
     """Mueve cada factura a la carpeta de su destino y actualiza el detalle. Una factura
     repartida entre varios pisos se archiva en la carpeta de cada uno: es el mismo documento,
-    y quien abra la carpeta de una villa tiene que encontrarlo ahí."""
+    y quien abra la carpeta de una villa tiene que encontrarlo ahí.
+
+    Deja en resultado["ultima_accion"] todo lo necesario para deshacer esto: solo la última
+    colocación se puede deshacer, no hace falta un historial completo para "me equivoqué
+    de piso, esta no era"."""
+    guardados = _codigos_guardados()
+    accion = {
+        "etiqueta": _etiqueta(destinos[0]) if len(destinos) == 1 else f"{len(destinos)} destinos",
+        "entradas": [],
+        "codigos_filas_antes": len(guardados) if guardados is not None else 0,
+        "codigo_nuevos": 0,
+    }
     for archivo in filas_archivos:
         fila = next(d for d in detalle if d["archivo"] == archivo and d["propiedad"] == "Sin identificar")
         ruta = next(output_dir.rglob(archivo), None)
         if ruta is None or not ruta.exists():
             continue
+        mes_carpeta = ruta.parent.name
+        estado_previo = {k: fila[k] for k in ("archivo", "propiedad", "metodo_match", "confianza", "importe")}
         reparto = importes if len(destinos) > 1 else [fila["importe"]]
         metodo = "manual" if len(destinos) == 1 else f"manual (repartida entre {len(destinos)})"
         filas = [fila] + [dict(fila) for _ in destinos[1:]]
+        movimientos = []
         for i, (destino, importe, f) in enumerate(zip(destinos, reparto, filas)):
-            nuevo_dir = output_dir / carpeta_destino[destino] / ruta.parent.name
+            nuevo_dir = output_dir / carpeta_destino[destino] / mes_carpeta
             nuevo_dir.mkdir(parents=True, exist_ok=True)
-            mover = shutil.move if i == len(destinos) - 1 else shutil.copy2
-            mover(str(ruta), str(nuevo_dir / ruta.name))
+            destino_ruta = nuevo_dir / ruta.name
+            movido = i == len(destinos) - 1
+            (shutil.move if movido else shutil.copy2)(str(ruta), str(destino_ruta))
+            movimientos.append({"ruta": str(destino_ruta), "movido": movido})
             f["propiedad"] = destino
             f["metodo_match"] = metodo
             f["confianza"] = 100.0
@@ -344,7 +377,51 @@ def _colocar(filas_archivos: list[str], destinos: list[str], importes: list[floa
                 fila_codigo = {"identificador": codigo, "propiedad": destino}
                 resultado["identificadores_nuevos"].append(fila_codigo)
                 _anadir_codigos([fila_codigo])
+                accion["codigo_nuevos"] += 1
         detalle.extend(filas[1:])
+        accion["entradas"].append({
+            "estado_previo": estado_previo,
+            "mes_carpeta": mes_carpeta,
+            "movimientos": movimientos,
+            "filas_extra": len(filas) - 1,
+        })
+    resultado["ultima_accion"] = accion
+    _guardar_estado(resultado)
+
+
+def _deshacer(accion: dict) -> None:
+    """Inverso exacto de _colocar: mueve el archivo movido de vuelta a Sin_identificar, borra
+    las copias hechas en otros destinos si la factura se repartió, devuelve la fila a su
+    estado previo, quita las filas nuevas que se añadieron por el reparto, y recorta la tabla
+    de códigos a las filas que tenía antes (siempre se añaden al final, nunca se reordena)."""
+    for entrada in accion["entradas"]:
+        movido = next((m for m in entrada["movimientos"] if m["movido"]), None)
+        if movido and Path(movido["ruta"]).exists():
+            vuelta_dir = output_dir / "Sin_identificar" / entrada["mes_carpeta"]
+            vuelta_dir.mkdir(parents=True, exist_ok=True)
+            shutil.move(movido["ruta"], str(vuelta_dir / Path(movido["ruta"]).name))
+        for m in entrada["movimientos"]:
+            if not m["movido"]:
+                Path(m["ruta"]).unlink(missing_ok=True)
+        fila = next((d for d in detalle if d["archivo"] == entrada["estado_previo"]["archivo"]), None)
+        if fila:
+            fila.update(entrada["estado_previo"])
+
+    total_extra = sum(e["filas_extra"] for e in accion["entradas"])
+    if total_extra:
+        del detalle[-total_extra:]
+
+    if accion["codigo_nuevos"]:
+        resultado["identificadores_nuevos"] = resultado["identificadores_nuevos"][: -accion["codigo_nuevos"]]
+        tabla = _codigos_guardados()
+        if tabla is not None:
+            recorte = tabla.iloc[: accion["codigos_filas_antes"]]
+            if recorte.empty:
+                CODIGOS_CSV.unlink(missing_ok=True)
+            else:
+                recorte.to_csv(CODIGOS_CSV, index=False, sep=";")
+
+    resultado["ultima_accion"] = None
     _guardar_estado(resultado)
 
 
@@ -365,6 +442,17 @@ tab_revisar, tab_resumen, tab_descargar = st.tabs(
 
 # ---------------------------------------------------------------- paso 2: colocar a mano
 with tab_revisar:
+    ultima_accion = resultado.get("ultima_accion")
+    if ultima_accion:
+        n_ultima = len(ultima_accion["entradas"])
+        if st.button(
+            f"↺ Deshacer: {n_ultima} factura(s) colocada(s) en {ultima_accion['etiqueta']}",
+            width="stretch",
+        ):
+            with compartido["lock"]:
+                _deshacer(ultima_accion)
+            st.rerun()
+
     if not pendientes:
         st.success("Todas las facturas están colocadas. Ve a **Descargar**.")
     else:
@@ -422,16 +510,21 @@ with tab_revisar:
             # Nada viene premarcado a propósito: estas coincidencias salen de buscar el nombre
             # del piso dentro del texto, y una factura que solo dice "CASTELLON" engancha con
             # cualquier piso de Castellón. Marcarlas solas invitaría a colocar mal de un clic.
+            # Con key fija por factura: sin ella, un widget sin key propia puede perder lo
+            # marcado en cuanto cambia algo más en la página (el "default" se recalcula en
+            # cada recarga y Streamlit lo vuelve a aplicar como si fuera la primera vez).
             elegidas = []
             if sugeridas:
                 elegidas = st.pills(
                     "Nombres que aparecen en el texto (compruébalo antes de fiarte)",
                     sugeridas, selection_mode="multi", format_func=_etiqueta,
+                    key=f"sugeridas_{actual['archivo']}",
                 )
 
             categoria = st.pills(
                 "¿Es un gasto general?", list(core.CATEGORIAS), format_func=_etiqueta,
                 help="No es de ningún piso: repostajes, la gestoría, Vodafone, Stripe...",
+                key=f"categoria_{actual['archivo']}",
             )
             pisos = st.multiselect(
                 "¿O de qué piso es?", [p["nombre"] for p in props],
@@ -440,6 +533,7 @@ with tab_revisar:
                 placeholder="Escribe para buscar el piso",
                 help="Puedes marcar varios: una factura de mantenimiento de piscinas cubre "
                 "cuatro villas en la misma hoja.",
+                key=f"pisos_{actual['archivo']}",
             )
             destinos = [categoria] if categoria else pisos
             if categoria and pisos:
@@ -468,6 +562,7 @@ with tab_revisar:
                         help="El CUPS de la luz, el nº de contrato del agua, la tarjeta de "
                         "gasolina... Se guarda en la tabla de códigos y el trimestre que viene "
                         "estas facturas se colocan solas.",
+                        key=f"codigo_{actual['archivo']}",
                     )
                     codigo = None if elegido.startswith("No,") else elegido
 
