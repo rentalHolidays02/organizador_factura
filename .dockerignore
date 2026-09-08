@@ -1,0 +1,12 @@
+.git
+.sesion/
+.streamlit/secrets.toml
+__pycache__/
+*.zip
+!tests_synthetic/facturas_test.zip
+facturas_organizadas/
+salida_final/
+salida_prueba/
+identificadores.csv
+codigos_guardados.csv
+propiedades activas.csv
