@@ -567,6 +567,13 @@ with tab_revisar:
                 "cuatro villas en la misma hoja.",
                 key=f"pisos_{actual['archivo']}",
             )
+            if pisos:
+                # La casilla del multiselect corta el nombre con "...": con nombres tan
+                # parecidos (REF 021, REF 022...) hay que poder leerlo entero para estar
+                # seguro de que es ese piso y no el de al lado.
+                for p in pisos:
+                    st.caption(f"✓ {_etiqueta(p)}")
+
             destinos = [categoria] if categoria else pisos
             if categoria and pisos:
                 st.warning("Elige una cosa o la otra: o es gasto general, o es de un piso.")
