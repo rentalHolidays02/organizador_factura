@@ -336,6 +336,23 @@ def _etiqueta(nombre: str) -> str:
     return ETIQUETA_CATEGORIA.get(nombre) or etiqueta_prop.get(nombre, nombre)
 
 
+def _ajustar_preview(imagen, rotacion: int, zoom: float, mover: float):
+    """Fotos de WhatsApp de un tique en la cama, torcidas y a veces boca abajo: rotar,
+    acercar y mover son justo lo que hace falta para leerlas sin salir de la app."""
+    if rotacion:
+        imagen = imagen.rotate(-rotacion, expand=True)
+    if zoom > 1.0:
+        ancho, alto = imagen.size
+        recorte_ancho, recorte_alto = ancho / zoom, alto / zoom
+        # mover va de -1 (todo a la izquierda) a 1 (todo a la derecha); 0 es el centro.
+        desplazamiento_max = (ancho - recorte_ancho) / 2
+        centro_x = ancho / 2 + mover * desplazamiento_max
+        izquierda = max(0, min(ancho - recorte_ancho, centro_x - recorte_ancho / 2))
+        arriba = (alto - recorte_alto) / 2
+        imagen = imagen.crop((izquierda, arriba, izquierda + recorte_ancho, arriba + recorte_alto))
+    return imagen
+
+
 def _colocar(filas_archivos: list[str], destinos: list[str], importes: list[float], codigo: str | None) -> None:
     """Mueve cada factura a la carpeta de su destino y actualiza el detalle. Una factura
     repartida entre varios pisos se archiva en la carpeta de cada uno: es el mismo documento,
@@ -491,8 +508,23 @@ with tab_revisar:
         with col_doc:
             with st.container(border=True):
                 st.caption(actual["archivo"])
+                c_girar, c_zoom = st.columns([1, 2])
+                rotacion = c_girar.segmented_control(
+                    "Girar", [0, 90, 180, 270], default=0, format_func=lambda g: f"{g}°",
+                    key=f"rot_{actual['archivo']}",
+                )
+                zoom = c_zoom.slider(
+                    "Acercar", 1.0, 3.0, 1.0, step=0.1, key=f"zoom_{actual['archivo']}"
+                )
+                mover = 0.0
+                if zoom > 1.0:
+                    mover = st.slider(
+                        "Mover a los lados", -1.0, 1.0, 0.0, step=0.05,
+                        key=f"mover_{actual['archivo']}",
+                    )
                 try:
-                    st.image(core.render_preview(ruta), width="stretch")
+                    imagen = _ajustar_preview(core.render_preview(ruta), rotacion or 0, zoom, mover)
+                    st.image(imagen, width="stretch")
                 except Exception as exc:
                     st.warning(f"Este archivo no se puede previsualizar: {exc}")
 
