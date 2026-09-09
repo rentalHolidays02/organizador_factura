@@ -1,4 +1,5 @@
 """UI Streamlit para organizador-facturas."""
+import io
 import json
 import os
 import shutil
@@ -50,6 +51,17 @@ def _anadir_codigos(nuevos: list[dict]) -> None:
     previo = _codigos_guardados()
     tabla = pd.concat([previo, pd.DataFrame(nuevos)], ignore_index=True) if previo is not None else pd.DataFrame(nuevos)
     tabla.to_csv(CODIGOS_CSV, index=False, sep=";")
+
+
+def _combinar_codigos(csv_bytes: bytes) -> int:
+    """Combina en vez de sustituir: subir un CSV de referencia no puede borrar lo que ya se
+    acumuló a mano colocando facturas estos días. Devuelve cuántas filas nuevas trajo."""
+    nueva = pd.read_csv(io.BytesIO(csv_bytes), dtype=str, sep=None, engine="python").fillna("")
+    previo = _codigos_guardados()
+    combinada = pd.concat([previo, nueva], ignore_index=True) if previo is not None else nueva
+    combinada = combinada.drop_duplicates()
+    combinada.to_csv(CODIGOS_CSV, index=False, sep=";")
+    return len(combinada) - (len(previo) if previo is not None else 0)
 
 
 def _propiedades_extra() -> list[dict]:
@@ -244,10 +256,19 @@ if resultado is None:
                 f"Hay {sin_asignar} código(s) más en la tabla sin piso asignado: no sirven "
                 "todavía. Se van rellenando solos según coloques esas facturas a mano aquí."
             )
-        with st.expander("Cambiar la tabla de códigos"):
-            nueva = st.file_uploader("Sustituirla por otro CSV", type=["csv"], key="sustituir")
-            if nueva is not None:
-                CODIGOS_CSV.write_bytes(nueva.getvalue())
+        with st.expander("Añadir más códigos desde otro CSV"):
+            st.caption(
+                "Se combina con la tabla guardada, no la sustituye: nada de lo acumulado "
+                "colocando facturas se pierde por subir un archivo de referencia."
+            )
+            nueva = st.file_uploader("CSV con más códigos", type=["csv"], key="sustituir")
+            # El archivo se queda "seleccionado" en el uploader tras procesarlo: sin comparar
+            # su file_id contra el último ya combinado, este bloque se repite en cada recarga
+            # de la página sin que nadie vuelva a tocar nada (bucle infinito de verdad).
+            if nueva is not None and st.session_state.get("_ultimo_sustituir") != nueva.file_id:
+                nuevas_filas = _combinar_codigos(nueva.getvalue())
+                st.session_state["_ultimo_sustituir"] = nueva.file_id
+                st.success(f"Combinado: {nuevas_filas} fila(s) nueva(s) añadida(s).")
                 st.rerun()
     else:
         st.warning(

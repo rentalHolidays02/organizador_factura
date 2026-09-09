@@ -8,6 +8,7 @@ services:
       # imagen no puede borrar 5 días de trabajo si el estado vive en el host.
       - ORGANIZADOR_SESION=/data/sesion
       - ORGANIZADOR_CODIGOS=/data/codigos_guardados.csv
+      - ORGANIZADOR_PROPIEDADES_EXTRA=/data/propiedades_extra.csv
     volumes:
       - organizador_datos:/data
     ports:
